@@ -38,9 +38,10 @@ jobs:
         env:
           # Meta System User token - stored in the repo secret named MACKO.
           ACCESS_TOKEN: ${{ secrets.MACKO }}
-          # Page ID and IG account ID are public identifiers, not secrets - hardcoded.
+          # Page ID is a public identifier, not a secret - hardcoded.
           FB_PAGE_ID: "967565996450877"
-          IG_USER_ID: "17841439182452199"
+          # IG account ID is auto-derived from the Page by publish.py - leave blank.
+          IG_USER_ID: ""
           # Images live in the repo's top-level images/ folder.
           # posts.json paths ("images/post-01.jpg") resolve against this base.
           IMAGE_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/
