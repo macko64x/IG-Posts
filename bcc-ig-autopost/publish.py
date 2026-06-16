@@ -130,7 +130,7 @@ def load_posts():
 
 
 def main():
-    token = os.environ.get("ACCESS_TOKEN") or os.environ.get("IG_ACCESS_TOKEN")
+    token = (os.environ.get("ACCESS_TOKEN") or os.environ.get("IG_ACCESS_TOKEN") or "").strip().strip('"').strip("'").strip()
     fb_page_id = os.environ.get("FB_PAGE_ID", "").strip()
     ig_user_id = os.environ.get("IG_USER_ID", "").strip()
     post_id = os.environ.get("POST_ID", "").strip()
@@ -140,6 +140,22 @@ def main():
         sys.exit("ERROR: ACCESS_TOKEN (or IG_ACCESS_TOKEN) is not set.")
     if not fb_page_id and not ig_user_id:
         sys.exit("ERROR: set at least one of FB_PAGE_ID / IG_USER_ID.")
+
+    # Auto-derive the Instagram Business account ID from the Page when not provided.
+    if fb_page_id and not ig_user_id:
+        try:
+            pg = graph("GET", fb_page_id, {
+                "fields": "instagram_business_account{id,username}",
+                "access_token": token,
+            })
+            iba = (pg or {}).get("instagram_business_account") or {}
+            if iba.get("id"):
+                ig_user_id = iba["id"]
+                print(f"Derived IG account from Page: @{iba.get('username','?')} ({ig_user_id})")
+            else:
+                print("No Instagram Business account is linked to this Page; Instagram will be skipped.")
+        except Exception as e:
+            print(f"Could not derive IG account from Page: {e}")
 
     targets = []
     if fb_page_id:
