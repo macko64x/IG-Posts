@@ -1,0 +1,47 @@
+name: Post to Facebook + Instagram
+
+# IMPORTANT: this file must live at the REPO ROOT path:
+#   .github/workflows/post.yml
+# GitHub Actions ignores workflow files placed inside subfolders.
+
+on:
+  schedule:
+    # 16:00 UTC daily = ~9:00 AM Pacific (8am PST / 9am PDT) - same LA calendar day.
+    # The script itself only publishes a post whose date == today (America/Los_Angeles),
+    # so on days with no scheduled post it simply no-ops.
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+    inputs:
+      post_id:
+        description: "Force-publish a single post id now (e.g. 1). Leave blank for normal date-based run."
+        required: false
+        default: ""
+      check_only:
+        description: "true = validate token/accounts only, publish nothing"
+        required: false
+        default: "false"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Publish today's post
+        working-directory: bcc-ig-autopost
+        env:
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          # Images live in the repo's top-level images/ folder.
+          # posts.json paths ("images/post-01.jpg") resolve against this base.
+          IMAGE_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/
+          POST_ID: ${{ github.event.inputs.post_id }}
+          CHECK_ONLY: ${{ github.event.inputs.check_only }}
+        run: python publish.py
