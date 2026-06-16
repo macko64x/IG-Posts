@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
 """
-Backcountry Chalet — Instagram auto-poster.
+Backcountry Chalet - Facebook + Instagram auto-poster.
 
-Publishes posts from posts.json to the @thebackcountrychalet Instagram account
-using the Meta Graph API (Instagram Content Publishing).
+Publishes posts from posts.json to the @thebackcountrychalet Facebook Page and
+Instagram Business account using the Meta Graph API.
 
 Runs inside GitHub Actions. Reads configuration from environment variables:
 
-  IG_USER_ID        Instagram Business account ID (e.g. 17841439102452199)   [required]
-  IG_ACCESS_TOKEN   System User long-lived token with instagram_content_publish [required]
-  IMAGE_BASE_URL    Public base URL for images. Optional — if unset, it is built
-                    from the GitHub repo so images resolve to raw.githubusercontent.com.
+  ACCESS_TOKEN      System User long-lived token. Needs pages_manage_posts (FB)
+                    and instagram_content_publish + instagram_basic (IG).
+                    (IG_ACCESS_TOKEN is also accepted for backward compatibility.)
+  FB_PAGE_ID        Facebook Page ID. If set, the post is published to Facebook.
+  IG_USER_ID        Instagram Business account ID. If set, the post is published to Instagram.
+  IMAGE_BASE_URL    Public base URL for images (must end with "/"). Optional - if unset,
+                    it is built from GITHUB_REPOSITORY/GITHUB_REF_NAME so images resolve
+                    to raw.githubusercontent.com/<owner>/<repo>/<branch>/bcc-ig-autopost/
+  GRAPH_VERSION     Graph API version. Default v21.0.
   POST_ID           If set, force-publish only that post id now (manual test).
-  CHECK_ONLY        "true" -> only validate token/account, publish nothing.
+  CHECK_ONLY        "true" -> validate token/IDs only, publish nothing.
 
-Behavior with no POST_ID: publishes every post whose date == today (America/Los_Angeles).
+At least one of FB_PAGE_ID / IG_USER_ID must be set.
+With no POST_ID: publishes every post whose date == today (America/Los_Angeles).
 Exit code is non-zero on any failure so the Actions run shows red.
+
+No third-party dependencies - standard library only.
 """
 
 import os
@@ -25,15 +33,14 @@ import time
 import datetime
 import urllib.parse
 import urllib.request
+import urllib.error
 
-GRAPH = "https://graph.facebook.com/v21.0"
+GRAPH = "https://graph.facebook.com/" + os.environ.get("GRAPH_VERSION", "v21.0")
+HERE = os.path.dirname(os.path.abspath(__file__))
+POSTS_PATH = os.path.join(HERE, "posts.json")
 
 
-def log(msg):
-    print(msg, flush=True)
-
-
-def api(method, path, params):
+def graph(method, path, params):
     """Minimal Graph API call using urllib (no third-party deps needed)."""
     url = f"{GRAPH}/{path}"
     data = urllib.parse.urlencode(params).encode()
@@ -59,100 +66,143 @@ def today_la():
         return (datetime.datetime.utcnow() - datetime.timedelta(hours=8)).date().isoformat()
 
 
-def image_base():
-    base = os.environ.get("IMAGE_BASE_URL", "").rstrip("/")
+def image_base_url():
+    base = os.environ.get("IMAGE_BASE_URL", "").strip()
     if base:
-        return base
-    repo = os.environ.get("GITHUB_REPOSITORY")  # "owner/repo"
-    ref = os.environ.get("GITHUB_REF_NAME", "main")
+        return base if base.endswith("/") else base + "/"
+    repo = os.environ.get("GITHUB_REPOSITORY", "")  # "owner/repo"
+    ref = os.environ.get("GITHUB_REF_NAME", "main") or "main"
     if not repo:
         raise RuntimeError("IMAGE_BASE_URL not set and GITHUB_REPOSITORY unavailable.")
-    return f"https://raw.githubusercontent.com/{repo}/{ref}"
+    return f"https://raw.githubusercontent.com/{repo}/{ref}/bcc-ig-autopost/"
 
 
-def publish_one(ig_user, token, base, post):
-    img_url = f"{base}/{post['image']}"
-    log(f"\n[post #{post['id']} · {post['date']}] image: {img_url}")
+def resolve_image(base, image_field):
+    # image_field is like "images/post-01.jpg" (relative to bcc-ig-autopost/)
+    return urllib.parse.urljoin(base, image_field.lstrip("/"))
 
-    # 1) create media container
-    res = api("POST", f"{ig_user}/media", {
-        "image_url": img_url,
-        "caption": post["caption"],
+
+def post_to_facebook(page_id, token, image_url, caption):
+    res = graph("POST", f"{page_id}/photos", {
+        "url": image_url,
+        "caption": caption,
         "access_token": token,
     })
-    creation_id = res.get("id")
-    if not creation_id:
-        raise RuntimeError(f"No creation id returned: {res}")
-    log(f"  container: {creation_id}")
+    return res.get("post_id") or res.get("id")
 
-    # 2) wait until the container is FINISHED (images are usually instant)
+
+def post_to_instagram(ig_user_id, token, image_url, caption):
+    # Step 1: create media container
+    container = graph("POST", f"{ig_user_id}/media", {
+        "image_url": image_url,
+        "caption": caption,
+        "access_token": token,
+    })
+    creation_id = container["id"]
+
+    # Step 2: poll until the container finishes processing
     for _ in range(20):
-        st = api("GET", creation_id, {"fields": "status_code,status", "access_token": token})
-        code = st.get("status_code")
+        status = graph("GET", creation_id, {
+            "fields": "status_code,status",
+            "access_token": token,
+        })
+        code = status.get("status_code")
         if code == "FINISHED":
             break
         if code == "ERROR":
-            raise RuntimeError(f"Container errored: {st}")
+            raise RuntimeError(f"IG container {creation_id} processing error: {status}")
         time.sleep(3)
+    else:
+        raise RuntimeError(f"IG container {creation_id} not ready after polling.")
 
-    # 3) publish
-    pub = api("POST", f"{ig_user}/media_publish", {
+    # Step 3: publish
+    published = graph("POST", f"{ig_user_id}/media_publish", {
         "creation_id": creation_id,
         "access_token": token,
     })
-    media_id = pub.get("id")
-    if not media_id:
-        raise RuntimeError(f"Publish failed: {pub}")
-    log(f"  PUBLISHED · media id {media_id}")
-    return media_id
+    return published.get("id")
+
+
+def load_posts():
+    with open(POSTS_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, list) else data.get("posts", [])
 
 
 def main():
-    ig_user = os.environ.get("IG_USER_ID")
-    token = os.environ.get("IG_ACCESS_TOKEN")
-    if not ig_user or not token:
-        log("ERROR: IG_USER_ID and IG_ACCESS_TOKEN must be set (GitHub secrets).")
-        sys.exit(2)
+    token = os.environ.get("ACCESS_TOKEN") or os.environ.get("IG_ACCESS_TOKEN")
+    fb_page_id = os.environ.get("FB_PAGE_ID", "").strip()
+    ig_user_id = os.environ.get("IG_USER_ID", "").strip()
+    post_id = os.environ.get("POST_ID", "").strip()
+    check_only = os.environ.get("CHECK_ONLY", "").strip().lower() == "true"
 
-    # Validate token + account first (cheap, confirms wiring).
-    me = api("GET", ig_user, {"fields": "username,followers_count,media_count", "access_token": token})
-    log(f"Account OK: @{me.get('username')} · {me.get('followers_count')} followers · {me.get('media_count')} posts")
+    if not token:
+        sys.exit("ERROR: ACCESS_TOKEN (or IG_ACCESS_TOKEN) is not set.")
+    if not fb_page_id and not ig_user_id:
+        sys.exit("ERROR: set at least one of FB_PAGE_ID / IG_USER_ID.")
 
-    if os.environ.get("CHECK_ONLY", "").lower() == "true":
-        log("CHECK_ONLY mode — validation passed, nothing published.")
+    targets = []
+    if fb_page_id:
+        targets.append("Facebook")
+    if ig_user_id:
+        targets.append("Instagram")
+    print(f"Channels enabled: {', '.join(targets)}")
+
+    if check_only:
+        me = graph("GET", "me", {"access_token": token})
+        print(f"Token OK. App user: {me.get('name', me)}")
+        if fb_page_id:
+            page = graph("GET", fb_page_id, {"fields": "name", "access_token": token})
+            print(f"Facebook Page OK: {page.get('name', fb_page_id)}")
+        if ig_user_id:
+            ig = graph("GET", ig_user_id, {"fields": "username", "access_token": token})
+            print(f"Instagram account OK: @{ig.get('username', ig_user_id)}")
+        print("CHECK_ONLY: nothing published.")
         return
 
-    posts = json.load(open(os.path.join(os.path.dirname(__file__), "posts.json"), encoding="utf-8"))
-    base = image_base()
+    posts = load_posts()
+    base = image_base_url()
 
-    post_id = os.environ.get("POST_ID", "").strip()
     if post_id:
-        targets = [p for p in posts if str(p["id"]) == post_id]
-        if not targets:
-            log(f"ERROR: no post with id {post_id}")
-            sys.exit(2)
-        log(f"Manual run: force-publishing post #{post_id}")
+        due = [p for p in posts if str(p.get("id")) == post_id]
+        if not due:
+            sys.exit(f"ERROR: POST_ID {post_id} not found in posts.json.")
     else:
         today = today_la()
-        targets = [p for p in posts if p["date"] == today]
-        log(f"Scheduled run for {today}: {len(targets)} post(s) due.")
+        due = [p for p in posts if p.get("date") == today]
+        print(f"Today (LA): {today}")
 
-    if not targets:
-        log("Nothing to publish today.")
+    if not due:
+        print("No post scheduled for today. Nothing to do.")
         return
 
     failures = 0
-    for p in targets:
-        try:
-            publish_one(ig_user, token, base, p)
-        except Exception as e:
-            failures += 1
-            log(f"  FAILED post #{p['id']}: {e}")
+    for p in due:
+        pid = p.get("id")
+        image_url = resolve_image(base, p["image"])
+        caption = p["caption"]
+        print(f"\n--- Post #{pid} ({p.get('date')}) ---")
+        print(f"Image: {image_url}")
+
+        if fb_page_id:
+            try:
+                fb_id = post_to_facebook(fb_page_id, token, image_url, caption)
+                print(f"  Facebook: published ({fb_id})")
+            except Exception as e:
+                failures += 1
+                print(f"  Facebook: FAILED - {e}")
+
+        if ig_user_id:
+            try:
+                ig_id = post_to_instagram(ig_user_id, token, image_url, caption)
+                print(f"  Instagram: published ({ig_id})")
+            except Exception as e:
+                failures += 1
+                print(f"  Instagram: FAILED - {e}")
 
     if failures:
-        log(f"\n{failures} post(s) failed.")
-        sys.exit(1)
-    log("\nDone.")
+        sys.exit(f"\n{failures} publish action(s) failed.")
+    print("\nAll posts published successfully.")
 
 
 if __name__ == "__main__":
