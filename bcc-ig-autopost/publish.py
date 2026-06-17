@@ -211,8 +211,9 @@ def main():
                 fb_id = post_to_facebook(fb_page_id, fb_token, image_url, caption)
                 print(f"  Facebook: published ({fb_id})")
             except Exception as e:
-                failures += 1
-                print(f"  Facebook: FAILED - {e}")
+                # Facebook is best-effort: a FB failure (e.g. pages_manage_posts not yet
+                # approved on the Meta app) must NOT block the daily Instagram post.
+                print(f"  Facebook: SKIPPED (non-fatal) - {e}")
 
         if ig_user_id:
             try:
