@@ -141,21 +141,27 @@ def main():
     if not fb_page_id and not ig_user_id:
         sys.exit("ERROR: set at least one of FB_PAGE_ID / IG_USER_ID.")
 
-    # Auto-derive the Instagram Business account ID from the Page when not provided.
-    if fb_page_id and not ig_user_id:
+    # Fetch the Page access token (required to publish to the Page) and auto-derive the
+    # linked Instagram Business account - both in one call.
+    fb_token = token
+    if fb_page_id:
         try:
             pg = graph("GET", fb_page_id, {
-                "fields": "instagram_business_account{id,username}",
+                "fields": "access_token,instagram_business_account{id,username}",
                 "access_token": token,
             })
-            iba = (pg or {}).get("instagram_business_account") or {}
-            if iba.get("id"):
-                ig_user_id = iba["id"]
-                print(f"Derived IG account from Page: @{iba.get('username','?')} ({ig_user_id})")
-            else:
-                print("No Instagram Business account is linked to this Page; Instagram will be skipped.")
+            if pg.get("access_token"):
+                fb_token = pg["access_token"]
+                print("Using Page access token for Facebook.")
+            if not ig_user_id:
+                iba = (pg or {}).get("instagram_business_account") or {}
+                if iba.get("id"):
+                    ig_user_id = iba["id"]
+                    print(f"Derived IG account from Page: @{iba.get('username','?')} ({ig_user_id})")
+                else:
+                    print("No Instagram Business account is linked to this Page; Instagram will be skipped.")
         except Exception as e:
-            print(f"Could not derive IG account from Page: {e}")
+            print(f"Could not fetch Page token / IG account: {e}")
 
     targets = []
     if fb_page_id:
@@ -202,7 +208,7 @@ def main():
 
         if fb_page_id:
             try:
-                fb_id = post_to_facebook(fb_page_id, token, image_url, caption)
+                fb_id = post_to_facebook(fb_page_id, fb_token, image_url, caption)
                 print(f"  Facebook: published ({fb_id})")
             except Exception as e:
                 failures += 1
